@@ -1,0 +1,8 @@
+build/
+install/
+log/
+*.pth
+*.pyc
+__pycache__/
+*.egg-info/
+src/autoware_auto_msgs/
