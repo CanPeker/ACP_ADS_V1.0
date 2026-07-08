@@ -76,6 +76,7 @@ class ControlNode(Node):
             gear_msg.command = GearCommand.REVERSE
         self.gear_pub.publish(gear_msg)
 
+    """
     def timer_callback(self):
         key = self.get_key()
 
@@ -99,7 +100,90 @@ class ControlNode(Node):
         msg.longitudinal.acceleration = 1.0
         msg.lateral.steering_tire_angle = self.steering
         self.publisherControl.publish(msg)
+    """
 
+    def timer_callback(self):
+        key = self.get_key()
+
+        # Vites geçişi
+        if key == '1':
+            self.gear = "D"
+            self.speed = 0.0
+            self.get_logger().info('Vites: DRIVE')
+        elif key == '2':
+            self.gear = "N"
+            self.speed = 0.0
+            self.get_logger().info('Vites: NEUTRAL')
+        elif key == '3':
+            self.gear = "R"
+            self.speed = 0.0
+            self.get_logger().info('Vites: REVERSE')
+
+        # Hareket kontrolü
+        elif key == 'w':
+            if self.gear == "D":
+                self.speed = min(self.speed + 0.5, 1.36)
+            elif self.gear == "R":
+                self.speed = min(self.speed + 0.3, 1.0)
+            # Neutral'da W çalışmaz
+
+        elif key == 's':
+            # Fren — her viteste çalışır
+            self.brake = min(self.brake + 2.0, 10.0)
+            self.speed = max(self.speed - 1.5, 0.0)
+
+        elif key == 'b':
+            # Acil fren
+            self.brake = 10.0
+            self.speed = 0.0
+
+        elif key == 'a':
+            self.steering = min(self.steering + 0.05, 0.15)
+
+        elif key == 'd':
+            self.steering = max(self.steering - 0.05, -0.15)
+
+        elif key == 'q':
+            self.speed = 0.0
+            self.steering = 0.0
+            self.brake = 0.0
+            self.gear = "N"
+
+        # Fren zamanla azalsın (W basılınca)
+        if key == 'w':
+            self.brake = max(self.brake - 1.0, 0.0)
+
+        # Mesaj oluştur
+        msg = AckermannControlCommand()
+        msg.stamp = self.get_clock().now().to_msg()
+        msg.lateral.steering_tire_angle = self.steering
+
+        if self.gear == "N":
+            msg.longitudinal.speed = 0.0
+            msg.longitudinal.acceleration = 0.0
+        elif self.gear == "D":
+            msg.longitudinal.speed = self.speed
+            msg.longitudinal.acceleration = -self.brake if self.brake > 0 else 1.0
+        elif self.gear == "R":
+            msg.longitudinal.speed = self.speed
+            msg.longitudinal.acceleration = -self.brake if self.brake > 0 else 0.5
+
+        self.publisher.publish(msg)
+
+        # Gear publish
+        gear_msg = GearCommand()
+        gear_msg.stamp = self.get_clock().now().to_msg()
+        if self.gear == "D":
+            gear_msg.command = GearCommand.DRIVE
+        elif self.gear == "N":
+            gear_msg.command = GearCommand.NEUTRAL
+        elif self.gear == "R":
+            gear_msg.command = GearCommand.REVERSE
+        self.gear_pub.publish(gear_msg)
+
+        self.get_logger().info(
+            f'Vites: {self.gear} | Hız: {self.speed*3.6:.0f} km/h | '
+            f'Fren: {self.brake:.1f} | Direksiyon: {self.steering:.2f}')
 
 def main(args=None):
 
