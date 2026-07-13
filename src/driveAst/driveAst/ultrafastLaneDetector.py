@@ -1,3 +1,7 @@
+"""
+update:
+#UPT
+"""
 import cv2
 import torch
 import scipy.special
@@ -113,12 +117,11 @@ class UltrafastLaneDetector():
 		output = self.inference(input_tensor)
 
 		# Process output data
-		self.lanes_points, self.lanes_detected = self.process_output(output, self.cfg)
-
-		# Draw depth image
+		self.lanes_points, self.lanes_detected = self.process_output(output, self.cfg) 
+		
 		visualization_img = self.draw_lanes(image, self.lanes_points, self.lanes_detected, self.cfg, draw_points)
-
-		return visualization_img
+		
+		return visualization_img,self.lanes_points, self.lanes_detected
 
 	def prepare_input(self, img):
 		# Transform the image for inference
