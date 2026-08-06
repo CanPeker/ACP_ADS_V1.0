@@ -1,109 +1,213 @@
-# ACP_ADS — Vision-Based Level-2 ADAS
+# ACP_ADS — Vision-Based ADAS Perception Stack
 
 > A hobby-built, camera-first Advanced Driver Assistance System.
-> **V1.0** delivers a working perception + lane-departure-warning chain running on ROS 2, fed by a simulated sensor source.
+> **V1.0** delivers real-time object detection and lane detection running on ROS 2, fed by a simulated sensor source.
 
-![status](https://img.shields.io/badge/version-1.0-blue)
+![version](https://img.shields.io/badge/version-1.0-blue)
 ![ros](https://img.shields.io/badge/ROS2-Humble-22314E)
 ![python](https://img.shields.io/badge/python-3.10-3776AB)
-![level](https://img.shields.io/badge/ADAS-Level%202%20(warning)-orange)
 
 ---
 
 ## What is this
 
-ACP_ADS is a personal project to build the **warning-level (Level 2) driver assistance stack** you'd find behind features like lane-departure and forward-collision alerts — but from scratch, with lightweight custom ROS 2 nodes instead of a full autonomy framework.
+ACP_ADS is a personal project that builds a **camera-based perception pipeline** for driver assistance — the kind of processing that sits behind features like lane-departure alerts and forward-collision warnings.
 
-The design goal is deliberate: **the system only warns, it never actuates.** No steering, throttle, or brake control. This keeps the scope honest for a hobby build and mirrors how real aftermarket Level-2 warning systems behave.
-
-**V1.0 scope** is the first vertical slice — camera in, warning out:
+V1.0 focuses on the **perception layer only**: detecting objects and lane lines from camera frames, then publishing structured outputs that downstream systems can consume.
 
 ```
-Camera frames  →  Perception  →  Lane Departure Warning
+Camera frames  →  Object Detection (YOLOv8)
+               →  Lane Detection (UFLD + Kalman Filter)
 ```
+
+No warnings, no vehicle control — just clean, reliable perception outputs. The warning layer comes in V1.5.
 
 ---
 
 ## Architecture
 
-The system is organized into layers, each node holding a single responsibility with defined topic inputs/outputs.
-
-| Layer | Node | Responsibility |
-|---|---|---|
-| **L1 · Sensing** | *(AWSIM)* | Provides camera frames + vehicle status (virtual sensor source) |
-| **L2 · Perception** | `yolo_node` | YOLOv8 object detection on incoming frames |
-| | `lane_node` | UFLD lane-line detection |
-| **L3 · Warning** | `ldw_node` | Lane Departure Warning from lane geometry |
-
-> **Note on AWSIM:** It is used purely as a *virtual sensor input source* (camera frames + vehicle status) during development — **not** as an Autoware full-stack host. This keeps the perception/warning layers independent of the simulator, so the same nodes can later be pointed at a real camera without rewriting the stack.
-
-### Data flow (V1.0)
-
 ```
-        ┌──────────────┐
-        │    AWSIM      │   virtual camera + vehicle status
-        └──────┬───────┘
-               │ image topic
-       ┌───────┴────────┐
-       ▼                ▼
- ┌───────────┐   ┌────────────┐
- │ yolo_node │   │ lane_node  │
- │ (YOLOv8)  │   │  (UFLD)    │
- └───────────┘   └─────┬──────┘
-                       │ lane geometry
-                       ▼
-                 ┌───────────┐
-                 │ ldw_node  │  → lane departure warning
-                 └───────────┘
+              ┌───────────────┐
+              │     AWSIM     │   virtual camera source
+              └───────┬───────┘
+                      │
+                      │  /sensing/camera/traffic_light/image_raw
+                      │
+           ┌──────────┴──────────┐
+           ▼                     ▼
+    ┌─────────────┐      ┌─────────────┐
+    │  yolo_node  │      │  lane_node  │
+    │  (YOLOv8)   │      │(UFLD + KF)  │
+    └──────┬──────┘      └──┬──────┬───┘
+           │                │      │
+           ▼                ▼      ▼
+  /Perception/          /Perception/   /Perception/
+  Object_Detection/     Lane/          Lane/
+  yolo_detected_images  detected_frames filtered_pos
 ```
+
+Both nodes subscribe to the same camera topic independently and publish their own outputs. This keeps them decoupled — either node can run standalone.
+
+> **Note on AWSIM:** It is used purely as a virtual sensor source (camera frames) during development. The perception nodes are simulator-agnostic and can be pointed at any camera topic.
 
 ---
 
-## Tech stack
+## Packages
 
-- **OS:** Ubuntu 22.04
-- **Middleware:** ROS 2 Humble
-- **Simulator / sensor source:** AWSIM v1.2.0 (TIER IV)
-- **Perception:** YOLOv8 (object detection), UFLD (Ultra-Fast Lane Detection)
-- **Language:** Python 3.10
+```
+ACP_ADS_V1.0/
+└── src/
+    ├── perception_layer/        # perception nodes + models
+    │   ├── perception_layer/
+    │   │   ├── yolo_node.py
+    │   │   ├── laneDetectorNode.py
+    │   │   ├── ultrafastLaneDetector.py
+    │   │   ├── model.py
+    │   │   └── backbone.py
+    │   ├── dnn/
+    │   │   └── yolov8n.pt
+    │   ├── config/
+    │   │   └── perception.yaml
+    │   ├── launch/
+    │   │   └── perception.launch.py
+    │   └── package.xml
+    │
+    ├── acp_ads_interfaces/      # custom message definitions
+    │   └── msg/
+    │       └── LaneRawData.msg
+    │
+    └── system_launch/           # top-level launch
+        └── launch/
+            └── full_system.launch.py
+```
 
 ---
 
 ## Nodes
 
 ### `yolo_node`
-Runs YOLOv8 inference on incoming camera frames and publishes detected objects (class, bounding box, confidence).
+
+Real-time object detection using YOLOv8.
+
+| | |
+|---|---|
+| **Subscribes** | `/sensing/camera/traffic_light/image_raw` (sensor_msgs/Image) |
+| **Publishes** | `/Perception/Object_Detection/yolo_detected_images` (sensor_msgs/Image) |
+| **Model** | YOLOv8n (COCO — person, bicycle, car, motorcycle, bus, truck) |
+| **QoS** | BEST_EFFORT, depth 10 |
 
 ### `lane_node`
-Runs UFLD lane detection and publishes lane-line geometry for downstream consumers.
 
-### `ldw_node`
-Consumes lane geometry and raises a **Lane Departure Warning** when the vehicle drifts across a lane boundary.
+Lane line detection using Ultra-Fast Lane Detection with Kalman filtering on lane positions.
+
+| | |
+|---|---|
+| **Subscribes** | `/sensing/camera/traffic_light/image_raw` (sensor_msgs/Image) |
+| **Publishes** | `/Perception/Lane/detected_frames` (sensor_msgs/Image) |
+| | `/Perception/Lane/filtered_pos` (acp_ads_interfaces/LaneRawData) |
+| **Model** | UFLD (TuSimple, ResNet-18 backbone) |
+| **Filtering** | Per-lane Kalman filter on lower-quarter x-coordinates |
+| **QoS** | BEST_EFFORT, depth 10 |
 
 ---
 
-## Getting started
+## Custom Messages
 
-> Requires Ubuntu 22.04 with ROS 2 Humble and AWSIM v1.2.0 installed.
+### `LaneRawData.msg`
 
-```bash
-# 1. Source ROS 2
-source /opt/ros/humble/setup.bash
-
-# 2. Build the workspace
-colcon build
-source install/setup.bash
-
-# 3. Launch AWSIM (virtual sensor source), then in a new terminal:
-ros2 topic list        # confirm camera + vehicle status topics are visible
-
-# 4. Run the nodes
-ros2 run <pkg> yolo_node
-ros2 run <pkg> lane_node
-ros2 run <pkg> ldw_node
+```
+std_msgs/Header header
+float32[] positions
 ```
 
-> Replace `<pkg>` with your package name. Launch-file support is planned (see Roadmap).
+Contains Kalman-filtered x-positions for up to 4 detected lanes.
+
+---
+
+## Tech Stack
+
+| Component | Technology |
+|---|---|
+| OS | Ubuntu 22.04 |
+| Middleware | ROS 2 Humble |
+| Sensor Source | AWSIM v1.2.0 (TIER IV) |
+| Object Detection | YOLOv8n (Ultralytics) |
+| Lane Detection | Ultra-Fast Lane Detection (TuSimple) |
+| Filtering | Kalman Filter (filterpy) |
+| Language | Python 3.10 |
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+- Ubuntu 22.04
+- ROS 2 Humble
+- AWSIM v1.2.0
+- Python 3.10 with pip
+
+### Installation
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/CanPeker/ACP_ADS_V1.0.git
+cd ACP_ADS_V1.0
+
+# 2. Install Python dependencies
+pip install ultralytics filterpy opencv-python torch torchvision scipy
+
+# 3. Source ROS 2 and build
+source /opt/ros/humble/setup.bash
+colcon build
+source install/setup.bash
+```
+
+### Running
+
+```bash
+# Terminal 1: Start AWSIM
+# (follow AWSIM launch instructions)
+
+# Terminal 2: Launch perception pipeline
+source install/setup.bash
+ros2 launch system_launch full_system.launch.py
+
+# Or run nodes individually:
+ros2 run perception_layer yolo_node
+ros2 run perception_layer lane_node
+```
+
+### Verify
+
+```bash
+# Check active topics
+ros2 topic list
+
+# View detection output
+ros2 topic echo /Perception/Object_Detection/yolo_detected_images --no-arr
+ros2 topic echo /Perception/Lane/filtered_pos
+```
+
+---
+
+## Configuration
+
+Node parameters are loaded from `config/perception.yaml`:
+
+```yaml
+yolo_node:
+  ros__parameters:
+    model_path: ""               # defaults to package share/dnn/yolov8n.pt
+    confidence_threshold: 0.5
+    input_topic: "/sensing/camera/traffic_light/image_raw"
+
+lane_node:
+  ros__parameters:
+    model_path: ""               # defaults to package share tusimple_18.pth
+    use_gpu: true
+    input_topic: "/sensing/camera/traffic_light/image_raw"
+```
 
 ---
 
@@ -119,27 +223,50 @@ ros2 run <pkg> ldw_node
 
 ## Roadmap
 
-V1.0 is the first working vertical slice. Planned direction:
+### V1.5 — Alert Layer *(under development)*
 
-- **Perception stability** — Kalman filtering on lane output, custom ROS 2 message definitions
-- **Collision warning** — ByteTrack object tracking + Forward Collision Warning (TTC-based)
-- **Dashboard** — HMI layer visualizing all perception + warning outputs on one screen
-- **Expansion** — pedestrian warning, speed warning, LiDAR + sensor fusion
+V1.0 provides perception outputs. V1.5 adds an **`alert_layer`** package that consumes these outputs and generates driver warnings:
+
+- **Lane Departure Warning (LDW):** Compares vehicle position against Kalman-filtered lane boundaries from `lane_node`. Triggers when the vehicle drifts toward a lane edge.
+- **Forward Collision Warning (FCW):** Uses object detections from `yolo_node` with distance estimation to warn about imminent collision risks.
+
+```
+perception_layer (V1.0)          alert_layer (V1.5)
+┌─────────────┐                ┌──────────────┐
+│  yolo_node  │ ──detections──►│   fcw_node   │──► collision warning
+└─────────────┘                └──────────────┘
+┌─────────────┐                ┌──────────────┐
+│  lane_node  │ ──lane pos────►│   ldw_node   │──► lane departure warning
+└─────────────┘                └──────────────┘
+```
+
+### Future
+
+- Multi-object tracking (ByteTrack)
+- HMI dashboard for unified visualization
+- C++ rewrite for production-grade performance (V2.0)
+- LiDAR integration and sensor fusion
 
 ---
 
-## Design principles
+## Design Principles
 
-- **Warn, don't actuate.** Level-2 warning scope only.
+- **Perception first.** Build reliable detection before adding decision layers.
 - **Simulator is just a sensor.** AWSIM feeds frames; the stack stays simulator-agnostic.
 - **Single-responsibility nodes.** Each node has one job and a clean topic contract.
-- **Lightweight over full-stack.** Custom nodes instead of Autoware, matched to the Level-2 goal.
+- **Decoupled layers.** Perception publishes, alert layer subscribes — no tight coupling.
 
 ---
 
 ## Author
 
-**Atılay Can Peker** — hobby ADAS build on a 2009 Mitsubishi Colt 1.3.
+**Atılay Can Peker**
+
+---
+
+## License
+
+MIT License — see [LICENSE](LICENSE) for details.
 
 ---
 
